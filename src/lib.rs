@@ -52,8 +52,9 @@ compile_error!("`attribute-order` and `attribute-sorted` are mutually exclusive 
 
 use std::borrow::Cow;
 use std::fmt;
-use std::io::{Read, Write};
+use std::io::Read;
 
+use tree_iterators_rs::prelude::{FallibleTreeIterator, FallibleTreeIteratorBase};
 pub use xml::namespace::Namespace;
 pub use xml::reader::ParserConfig;
 use xml::reader::{EventReader, XmlEvent};
@@ -156,9 +157,6 @@ pub struct Element {
     ///   which will retain item insertion order.
     /// * If the "attribute-sorted" feature is enabled, then this is a [`std::collections::BTreeMap`], which maintains keys in sorted order.
     pub attributes: AttributeMap<String, String>,
-
-    /// Children
-    pub children: Vec<XMLNode>,
 }
 
 /// Errors that can occur parsing XML
@@ -196,56 +194,6 @@ impl std::error::Error for ParseError {
     }
 }
 
-fn build<B: Read>(reader: &mut EventReader<B>, mut elem: Element) -> Result<Element, ParseError> {
-    loop {
-        match reader.next() {
-            Ok(XmlEvent::EndElement { ref name }) => {
-                if name.local_name == elem.name {
-                    return Ok(elem);
-                } else {
-                    return Err(ParseError::CannotParse);
-                }
-            }
-            Ok(XmlEvent::StartElement {
-                name,
-                attributes,
-                namespace,
-            }) => {
-                let mut attr_map = AttributeMap::new();
-                for attr in attributes {
-                    attr_map.insert(attr.name.local_name, attr.value);
-                }
-
-                let new_elem = Element {
-                    prefix: name.prefix,
-                    namespace: name.namespace,
-                    namespaces: if namespace.is_essentially_empty() {
-                        None
-                    } else {
-                        Some(namespace)
-                    },
-                    name: name.local_name,
-                    attributes: attr_map,
-                    children: Vec::new(),
-                };
-                elem.children
-                    .push(XMLNode::Element(build(reader, new_elem)?));
-            }
-            Ok(XmlEvent::Characters(s)) => elem.children.push(XMLNode::Text(s)),
-            Ok(XmlEvent::Whitespace(..)) => (),
-            Ok(XmlEvent::Comment(s)) => elem.children.push(XMLNode::Comment(s)),
-            Ok(XmlEvent::CData(s)) => elem.children.push(XMLNode::CData(s)),
-            Ok(XmlEvent::ProcessingInstruction { name, data }) => elem
-                .children
-                .push(XMLNode::ProcessingInstruction(name, data)),
-            Ok(XmlEvent::StartDocument { .. }) | Ok(XmlEvent::EndDocument) => {
-                return Err(ParseError::CannotParse)
-            }
-            Err(e) => return Err(ParseError::MalformedXml(e)),
-        }
-    }
-}
-
 impl Element {
     /// Create a new empty element with given name
     ///
@@ -257,7 +205,6 @@ impl Element {
             namespace: None,
             namespaces: None,
             attributes: AttributeMap::new(),
-            children: Vec::new(),
         }
     }
 
@@ -265,231 +212,13 @@ impl Element {
     ///
     /// This is useful when you want to capture comments or processing instructions that appear
     /// before or after the root node
-    pub fn parse_all<R: Read>(r: R) -> Result<Vec<XMLNode>, ParseError> {
+    pub fn parse_all<R: Read>(r: R) -> XMLTreeIterator<R> {
         let parser_config = ParserConfig::new().ignore_comments(false);
         Element::parse_all_with_config(r, parser_config)
     }
 
-    pub fn parse_all_with_config<R: Read>(
-        r: R,
-        parser_config: ParserConfig,
-    ) -> Result<Vec<XMLNode>, ParseError> {
-        let mut reader = EventReader::new_with_config(r, parser_config);
-        let mut root_nodes = Vec::new();
-        loop {
-            match reader.next() {
-                Ok(XmlEvent::StartElement {
-                    name,
-                    attributes,
-                    namespace,
-                }) => {
-                    let mut attr_map = AttributeMap::allocate(attributes.len());
-                    for attr in attributes {
-                        attr_map.insert(attr.name.local_name, attr.value);
-                    }
-
-                    let root = Element {
-                        prefix: name.prefix,
-                        namespace: name.namespace,
-                        namespaces: if namespace.is_essentially_empty() {
-                            None
-                        } else {
-                            Some(namespace)
-                        },
-                        name: name.local_name,
-                        attributes: attr_map,
-                        children: Vec::new(),
-                    };
-                    root_nodes.push(XMLNode::Element(build(&mut reader, root)?));
-                }
-                Ok(XmlEvent::Comment(comment_string)) => {
-                    root_nodes.push(XMLNode::Comment(comment_string))
-                }
-                Ok(XmlEvent::Characters(text_string)) => {
-                    root_nodes.push(XMLNode::Text(text_string))
-                }
-                Ok(XmlEvent::CData(cdata_string)) => root_nodes.push(XMLNode::CData(cdata_string)),
-                Ok(XmlEvent::Whitespace(..)) | Ok(XmlEvent::StartDocument { .. }) => continue,
-                Ok(XmlEvent::ProcessingInstruction { name, data }) => {
-                    root_nodes.push(XMLNode::ProcessingInstruction(name, data))
-                }
-                Ok(XmlEvent::EndElement { .. }) => (),
-                Ok(XmlEvent::EndDocument) => return Ok(root_nodes),
-                Err(e) => return Err(ParseError::MalformedXml(e)),
-            }
-        }
-    }
-
-    /// Parses some data into an Element
-    pub fn parse<R: Read>(r: R) -> Result<Element, ParseError> {
-        let nodes = Element::parse_all(r)?;
-        for node in nodes {
-            if let XMLNode::Element(elem) = node {
-                return Ok(elem);
-            }
-        }
-        // This assume the underlying xml library throws an error on no root element
-        unreachable!();
-    }
-
-    pub fn parse_with_config<R: Read>(r: R, config: ParserConfig) -> Result<Element, ParseError> {
-        let nodes = Element::parse_all_with_config(r, config)?;
-        for node in nodes {
-            if let XMLNode::Element(elem) = node {
-                return Ok(elem);
-            }
-        }
-        // This assume the underlying xml library throws an error on no root element
-        unreachable!();
-    }
-
-    fn _write<B: Write>(&self, emitter: &mut xml::writer::EventWriter<B>) -> Result<(), Error> {
-        use xml::attribute::Attribute;
-        use xml::name::Name;
-        use xml::writer::events::XmlEvent;
-
-        let mut name = Name::local(&self.name);
-        if let Some(ref ns) = self.namespace {
-            name.namespace = Some(ns);
-        }
-        if let Some(ref p) = self.prefix {
-            name.prefix = Some(p);
-        }
-
-        let mut attributes = Vec::with_capacity(self.attributes.len());
-        for (k, v) in &self.attributes {
-            attributes.push(Attribute {
-                name: Name::local(k),
-                value: v,
-            });
-        }
-
-        let empty_ns = Namespace::empty();
-        let namespace = if let Some(ref ns) = self.namespaces {
-            Cow::Borrowed(ns)
-        } else {
-            Cow::Borrowed(&empty_ns)
-        };
-
-        emitter.write(XmlEvent::StartElement {
-            name,
-            attributes: Cow::Owned(attributes),
-            namespace,
-        })?;
-        for node in &self.children {
-            match node {
-                XMLNode::Element(elem) => elem._write(emitter)?,
-                XMLNode::Text(text) => emitter.write(XmlEvent::Characters(text))?,
-                XMLNode::Comment(comment) => emitter.write(XmlEvent::Comment(comment))?,
-                XMLNode::CData(comment) => emitter.write(XmlEvent::CData(comment))?,
-                XMLNode::ProcessingInstruction(name, data) => match data.to_owned() {
-                    Some(string) => emitter.write(XmlEvent::ProcessingInstruction {
-                        name,
-                        data: Some(&string),
-                    })?,
-                    None => emitter.write(XmlEvent::ProcessingInstruction { name, data: None })?,
-                },
-            }
-            // elem._write(emitter)?;
-        }
-        emitter.write(XmlEvent::EndElement { name: Some(name) })?;
-
-        Ok(())
-    }
-
-    /// Writes out this element as the root element in an new XML document
-    pub fn write<W: Write>(&self, w: W) -> Result<(), Error> {
-        self.write_with_config(w, EmitterConfig::new())
-    }
-
-    /// Writes out this element as the root element in a new XML document using the provided configuration
-    pub fn write_with_config<W: Write>(&self, w: W, config: EmitterConfig) -> Result<(), Error> {
-        use xml::common::XmlVersion;
-        use xml::writer::events::XmlEvent;
-        use xml::writer::EventWriter;
-
-        let write_document_declaration = config.write_document_declaration;
-        let mut emitter = EventWriter::new_with_config(w, config);
-        if write_document_declaration {
-            emitter.write(XmlEvent::StartDocument {
-                version: XmlVersion::Version10,
-                encoding: None,
-                standalone: None,
-            })?;
-        }
-        self._write(&mut emitter)
-    }
-
-    /// Find a child element with the given name and return a reference to it.
-    ///
-    /// Both `&str` and `String` implement `ElementPredicate` and can be used to search for child
-    /// elements that match the given element name with `.get_child("element_name")`.  You can also
-    /// search by `("element_name", "tag_name")` tuple.
-    ///
-    ///
-    /// Note: this will only return Elements.  To get other nodes (like comments), iterate through
-    /// the `children` field.
-    pub fn get_child<P: ElementPredicate>(&self, k: P) -> Option<&Element> {
-        self.children
-            .iter()
-            .filter_map(|e| match e {
-                XMLNode::Element(elem) => Some(elem),
-                _ => None,
-            })
-            .find(|e| k.match_element(e))
-    }
-
-    /// Find a child element with the given name and return a mutable reference to it.
-    pub fn get_mut_child<P: ElementPredicate>(&mut self, k: P) -> Option<&mut Element> {
-        self.children
-            .iter_mut()
-            .filter_map(|e| match e {
-                XMLNode::Element(elem) => Some(elem),
-                _ => None,
-            })
-            .find(|e| k.match_element(e))
-    }
-
-    /// Find a child element with the given name, remove and return it.
-    pub fn take_child<P: ElementPredicate>(&mut self, k: P) -> Option<Element> {
-        let index = self.children.iter().position(|e| match e {
-            XMLNode::Element(elem) => k.match_element(elem),
-            _ => false,
-        });
-        match index {
-            Some(index) => match self.children.remove(index) {
-                XMLNode::Element(elem) => Some(elem),
-                _ => None,
-            },
-            None => None,
-        }
-    }
-
-    /// Returns the inner text/cdata of this element, if any.
-    ///
-    /// If there are multiple text/cdata nodes, they will be all concatenated into one string.
-    pub fn get_text<'a>(&'a self) -> Option<Cow<'a, str>> {
-        let text_nodes: Vec<&'a str> = self
-            .children
-            .iter()
-            .filter_map(|node| node.as_text().or_else(|| node.as_cdata()))
-            .collect();
-        if text_nodes.is_empty() {
-            None
-        } else if text_nodes.len() == 1 {
-            Some(Cow::Borrowed(text_nodes[0]))
-        } else {
-            let mut full_text = String::new();
-            for text in text_nodes {
-                full_text.push_str(text);
-            }
-            Some(Cow::Owned(full_text))
-        }
-    }
-
-    /// Checks if this element matches the predicate.
-    pub fn matches<P: ElementPredicate>(&self, k: P) -> bool {
-        k.match_element(self)
+    pub fn parse_all_with_config<R: Read>(r: R, parser_config: ParserConfig) -> XMLTreeIterator<R> {
+        XMLTreeIterator::new(r, parser_config)
     }
 }
 
@@ -553,3 +282,162 @@ where
                 .unwrap_or(false)
     }
 }
+
+pub struct XMLTreeIterator<R: Read> {
+    reader: EventReader<R>,
+    open_element_names: Vec<String>,
+    prune_stack: Vec<bool>,
+    path: Vec<usize>,
+    errored: bool,
+    moved: bool,
+}
+
+impl<R: Read> XMLTreeIterator<R> {
+    fn new(r: R, parser_config: ParserConfig) -> Self {
+        Self {
+            reader: EventReader::new_with_config(r, parser_config),
+            open_element_names: Vec::new(),
+            prune_stack: Vec::new(),
+            path: Vec::new(),
+            errored: false,
+            moved: false,
+        }
+    }
+}
+
+impl<R: Read> Iterator for XMLTreeIterator<R> {
+    type Item = Result<XMLNode, ParseError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.errored {
+            return None;
+        }
+
+        loop {
+            match self.reader.next() {
+                Ok(XmlEvent::EndElement { ref name }) => {
+                    self.moved = true;
+
+                    if Some(&name.local_name) == self.open_element_names.last() {
+                        self.open_element_names.pop();
+                        self.prune_stack.pop();
+                        if self.open_element_names.len() < self.path.len() {
+                            self.path.pop();
+                        }
+                    } else {
+                        self.errored = true;
+                        return Some(Err(ParseError::CannotParse));
+                    }
+                }
+                Ok(XmlEvent::StartElement {
+                    name,
+                    attributes,
+                    namespace,
+                }) => {
+                    self.moved = true;
+
+                    let mut attr_map = AttributeMap::new();
+                    for attr in attributes {
+                        attr_map.insert(attr.name.local_name, attr.value);
+                    }
+
+                    let new_elem = Element {
+                        prefix: name.prefix,
+                        namespace: name.namespace,
+                        namespaces: if namespace.is_essentially_empty() {
+                            None
+                        } else {
+                            Some(namespace)
+                        },
+                        name: name.local_name.clone(),
+                        attributes: attr_map,
+                    };
+
+                    self.open_element_names.push(name.local_name);
+                    self.prune_stack.push(false);
+                    while self.path.len() > self.open_element_names.len() {
+                        self.path.pop();
+                    }
+
+                    if self.path.len() < self.open_element_names.len() - 1 {
+                        self.path.push(0);
+                    }
+                    if let Some(last_path_segment) = self.path.last_mut() {
+                        *last_path_segment += 1;
+                    } else if self.open_element_names.len() > 1 {
+                        self.path.push(0);
+                    }
+
+                    if !self.prune_stack.iter().any(|pruned| *pruned) {
+                        return Some(Ok(XMLNode::Element(new_elem)));
+                    }
+                }
+                Ok(XmlEvent::Characters(s)) => {
+                    self.moved = true;
+
+                    self.path.push(0);
+                    if !self.prune_stack.iter().any(|pruned| *pruned) {
+                        return Some(Ok(XMLNode::Text(s)));
+                    }
+                }
+                Ok(XmlEvent::Whitespace(..)) => {
+                    self.moved = true;
+                }
+                Ok(XmlEvent::Comment(s)) => {
+                    self.moved = true;
+
+                    self.path.push(0);
+                    if !self.prune_stack.iter().any(|pruned| *pruned) {
+                        return Some(Ok(XMLNode::Comment(s)));
+                    }
+                }
+                Ok(XmlEvent::CData(s)) => {
+                    self.moved = true;
+
+                    self.path.push(0);
+                    if !self.prune_stack.iter().any(|pruned| *pruned) {
+                        return Some(Ok(XMLNode::CData(s)));
+                    }
+                }
+                Ok(XmlEvent::ProcessingInstruction { name, data }) => {
+                    self.moved = true;
+
+                    self.path.push(0);
+                    if !self.prune_stack.iter().any(|pruned| *pruned) {
+                        return Some(Ok(XMLNode::ProcessingInstruction(name, data)));
+                    }
+                }
+                Ok(XmlEvent::StartDocument { .. }) => {
+                    if self.moved {
+                        return Some(Err(ParseError::CannotParse));
+                    }
+
+                    self.moved = true;
+                }
+                Ok(XmlEvent::EndDocument) => {
+                    return None;
+                }
+                Err(e) => {
+                    self.moved = true;
+
+                    self.errored = true;
+                    return Some(Err(ParseError::MalformedXml(e)));
+                }
+            }
+        }
+    }
+}
+
+impl<R: Read> FallibleTreeIteratorBase<XMLNode, (), ParseError> for XMLTreeIterator<R> {
+    fn current_path(&self) -> &[usize] {
+        &self.path
+    }
+
+    fn prune_current_subtree(&mut self) {
+        if let Some(top) = self.prune_stack.last_mut() {
+            *top = true;
+        }
+    }
+}
+
+impl<R: Read> FallibleTreeIterator<XMLNode, (), ParseError> for XMLTreeIterator<R> {}
