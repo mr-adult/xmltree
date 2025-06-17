@@ -13,8 +13,7 @@ fn test_01() {
                 false
             }
         })
-        .collect_tree()
-        .unwrap()
+        .collect_trees()
         .unwrap();
     println!("{e:#?}");
 }
@@ -22,8 +21,7 @@ fn test_01() {
 #[test]
 fn test_02() {
     let e = Element::parse_all(File::open("tests/data/02.xml").unwrap())
-        .collect_tree()
-        .unwrap()
+        .collect_trees()
         .unwrap();
     println!("{:#?}", e);
 }
@@ -31,8 +29,7 @@ fn test_02() {
 #[test]
 fn test_03() {
     let e = Element::parse_all(File::open("tests/data/03.xml").unwrap())
-        .collect_tree()
-        .unwrap()
+        .collect_trees()
         .unwrap();
     println!("{:#?}", e);
 }
@@ -40,12 +37,11 @@ fn test_03() {
 #[test]
 fn test_04() {
     let e = Element::parse_all(File::open("tests/data/04.xml").unwrap())
-        .collect_tree()
-        .unwrap()
+        .collect_trees()
         .unwrap();
     println!("{:#?}", e);
 
-    if let XMLNode::ProcessingInstruction(pt1, pt2) = &e.children[0].value {
+    if let XMLNode::ProcessingInstruction(pt1, pt2) = &e[1].children[0].value {
         assert_eq!(pt1, "pi");
         assert_eq!(pt2.as_ref().unwrap(), "foo=\"blah\"");
     } else {
@@ -55,7 +51,7 @@ fn test_04() {
 
 #[test]
 fn test_no_root_node() {
-    let result = Element::parse_all(File::open("tests/data/05.xml").unwrap()).collect_tree();
+    let result = Element::parse_all(File::open("tests/data/05.xml").unwrap()).collect_trees();
     assert!(result.is_err())
 }
 
@@ -71,7 +67,7 @@ fn test_mal_01() {
         </names>
     "#;
 
-    let names_element = Element::parse_all(data.as_bytes()).collect_tree();
+    let names_element = Element::parse_all(data.as_bytes()).collect_trees();
     if let Err(ParseError::MalformedXml(..)) = names_element {
         // OK
     } else {
@@ -89,7 +85,7 @@ fn test_mal_02() {
             to XML
     "##;
 
-    let names_element = Element::parse_all(data.as_bytes()).collect_tree();
+    let names_element = Element::parse_all(data.as_bytes()).collect_trees();
     if let Err(ParseError::MalformedXml(..)) = names_element {
         // OK
     } else {
@@ -110,7 +106,7 @@ fn test_mal_03() {
         </names>
     "#;
 
-    let names_element = Element::parse_all(data.as_bytes()).collect_tree();
+    let names_element = Element::parse_all(data.as_bytes()).collect_trees();
     if let Err(ParseError::MalformedXml(..)) = names_element {
         // OK
     } else {

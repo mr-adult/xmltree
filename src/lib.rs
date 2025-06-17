@@ -54,7 +54,9 @@ use std::borrow::Cow;
 use std::fmt;
 use std::io::Read;
 
-use tree_iterators_rs::prelude::{FallibleTreeIterator, FallibleTreeIteratorBase};
+use tree_iterators_rs::fallible_tree_collection_iterators::{
+    FallibleTreeCollectionIterator, FallibleTreeCollectionIteratorBase,
+};
 pub use xml::namespace::Namespace;
 pub use xml::reader::ParserConfig;
 use xml::reader::{EventReader, XmlEvent};
@@ -321,7 +323,7 @@ impl<R: Read> Iterator for XMLTreeIterator<R> {
                     if Some(&name.local_name) == self.open_element_names.last() {
                         self.open_element_names.pop();
                         self.prune_stack.pop();
-                        if self.open_element_names.len() < self.path.len() {
+                        if self.open_element_names.len() + 1 < self.path.len() {
                             self.path.pop();
                         }
                     } else {
@@ -355,17 +357,15 @@ impl<R: Read> Iterator for XMLTreeIterator<R> {
 
                     self.open_element_names.push(name.local_name);
                     self.prune_stack.push(false);
-                    while self.path.len() > self.open_element_names.len() {
+                    while self.path.len() > self.open_element_names.len() + 1 {
                         self.path.pop();
                     }
 
-                    if self.path.len() < self.open_element_names.len() - 1 {
+                    if self.path.len() < self.open_element_names.len() {
                         self.path.push(0);
                     }
                     if let Some(last_path_segment) = self.path.last_mut() {
                         *last_path_segment += 1;
-                    } else if self.open_element_names.len() > 1 {
-                        self.path.push(0);
                     }
 
                     if !self.prune_stack.iter().any(|pruned| *pruned) {
@@ -428,7 +428,7 @@ impl<R: Read> Iterator for XMLTreeIterator<R> {
     }
 }
 
-impl<R: Read> FallibleTreeIteratorBase<XMLNode, (), ParseError> for XMLTreeIterator<R> {
+impl<R: Read> FallibleTreeCollectionIteratorBase<XMLNode, (), ParseError> for XMLTreeIterator<R> {
     fn current_path(&self) -> &[usize] {
         &self.path
     }
@@ -440,4 +440,4 @@ impl<R: Read> FallibleTreeIteratorBase<XMLNode, (), ParseError> for XMLTreeItera
     }
 }
 
-impl<R: Read> FallibleTreeIterator<XMLNode, (), ParseError> for XMLTreeIterator<R> {}
+impl<R: Read> FallibleTreeCollectionIterator<XMLNode, (), ParseError> for XMLTreeIterator<R> {}
